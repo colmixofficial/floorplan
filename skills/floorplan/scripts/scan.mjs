@@ -17,6 +17,7 @@ import { findIssues } from './lib/health.mjs';
 import { findScreens } from './lib/screens.mjs';
 import { createResolver, applyGlobalUsings } from './lib/resolve.mjs';
 import { resolveRoutes, matchCalls, matchWayfinder, inertiaLinks } from './lib/routes.mjs';
+import { parseRoutePrefixes } from './lib/route-prefixes.mjs';
 import { nuxtAutoImports } from './lib/nuxt.mjs';
 import { serverlessRoutes } from './lib/serverless.mjs';
 import { edgeFunctionRoutes } from './lib/supabase-functions.mjs';
@@ -181,7 +182,11 @@ if (wrappers.size) for (const f of files) {
 // ---------- 4. routes and HTTP calls ----------
 // plain PHP sites: each script under the document root is a page with its own address (needs the imports above)
 phpPages(files);
-const routes = resolveRoutes(files);
+// architecture.json, once it's written: "routePrefixes" places routers a registry mounts at run time
+let archJson = null;
+try { archJson = readJsonFile(path.join(outDir, 'architecture.json')); } catch {}
+const routePrefixes = parseRoutePrefixes(archJson?.routePrefixes);
+const routes = resolveRoutes(files, { routePrefixes: routePrefixes.rules });
 // Serverless Framework: endpoints declared in serverless.yml, placed in the file that answers them (lib/serverless.mjs)
 const serverless = serverlessRoutes(files, (p) => { try { return fs.readFileSync(path.join(root, p), 'utf8'); } catch { return ''; } });
 routes.push(...serverless.routes);
@@ -262,7 +267,7 @@ for (const f of scan.files) byCat[f.category] = (byCat[f.category] || 0) + 1;
 line(`FILES  ${Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
 // the kinds the map will show: architecture.json's "include" once it's written, code alone until then
 let include = ['code'];
-try { const a = readJsonFile(path.join(outDir, 'architecture.json')); if (Array.isArray(a?.include) && a.include.every((k) => typeof k === 'string')) include = a.include; } catch {}
+if (Array.isArray(archJson?.include) && archJson.include.every((k) => typeof k === 'string')) include = archJson.include;
 const leftOut = notMapped(scan.files, include);
 if (leftOut.line) line(leftOut.line);
 const byLang = {};
@@ -336,6 +341,13 @@ for (const h of http) {
 }
 for (const [k, v] of [...httpDir.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)) line(`  ${String(v).padStart(5)}  ${k}`);
 line();
+
+// routePrefixes: how many routes each rule placed, and the rules that couldn't be used
+if (routePrefixes.rules.length || routePrefixes.problems.length) {
+  for (const r of routePrefixes.rules) line(`ROUTE PREFIXES  ${r.label}: ${r.placed} route${r.placed === 1 ? '' : 's'}`);
+  for (const p of routePrefixes.problems) line(`ROUTE PREFIXES  ${p}`);
+  line();
+}
 
 // actix-web: endpoints placed in the function that answers them, and those left at their registration
 const rustNamed = routes.filter((r) => r.framework !== 'laravel' && (r.handlerUnresolved || (r.defFile && r.defFile.endsWith('.rs'))));

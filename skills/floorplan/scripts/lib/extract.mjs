@@ -368,6 +368,13 @@ function extractJs(src, filePath) {
     if (ROUTER_MAKER.test(callee.split('.').pop())) routerVars.add(m[1]);
     else if (!m[2] && !madeBy.has(m[1])) madeBy.set(m[1], callee);
   }
+  // Routers handed to this file at run time (Hono module registries, plugins): `const r = ctx.routes` takes
+  // a property named like a router, and `function registerExtra(r: Hono<Env>)` a parameter typed as one.
+  for (const m of all(/(?<![\w$])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]{1,200}?)?=\s*(?:this|[A-Za-z_$][\w$]*)(?:\s*\??\.\s*[A-Za-z_$][\w$]*){0,3}\s*\??\.\s*([A-Za-z_$][\w$]*)\s*(?=;|\n|$)/g, code)) {
+    if (ROUTER_NAME.test(m[2])) routerVars.add(m[1]);
+  }
+  // (in a parameter list only: after ( or , — an interface's `api: Express;` field is no router)
+  for (const m of all(/[(,][ \t]*(?:\r?\n[ \t]*)?([A-Za-z_$][\w$]*)[ \t]*\??[ \t]*:[ \t]*(?:Hono|OpenAPIHono|Router|Express|Koa|FastifyInstance)\b(?!\s*[.(])/g, code)) routerVars.add(m[1]);
   for (const m of all(/(?<![\w$])([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|all|options|head)\(\s*["'`](\/[^"'`]*)["'`]/g, code)) {
     if (!ROUTER_NAME.test(m[1]) && !routerVars.has(m[1])) continue;
     routes.push({ method: m[2].toUpperCase(), path: m[3], var: m[1], line: at(m.index) });

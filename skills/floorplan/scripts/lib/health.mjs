@@ -723,6 +723,39 @@ function jsRoutes(src, f, out) {
     if (name) uses.push({ v: m[1], line: lineOf(m.index), name });
   }
   for (const u of uses) if (u.v === 'app' || u.v === 'server') out.push({ k: 'global-guard', framework: 'express', name: u.name, line: u.line });
+  // a guard held in a local constant and handed to routes by name: `const edit = requireScope('edit')`,
+  // `const person = [denyService, requireAuth] as const`, then router.post('/x', edit, …) or (…, ...person, …).
+  // Only what the value calls (or names) counts, never a word inside it: z.object({ token }) is no guard. The
+  // declaration nearest above the route wins.
+  let held = null;
+  const topLevel = (s) => {
+    const out = []; let depth = 0, from = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c)) depth--;
+      else if (c === ',' && depth === 0) { out.push(s.slice(from, i)); from = i + 1; }
+    }
+    out.push(s.slice(from));
+    return out;
+  };
+  const heldGuard = (name, line) => {
+    if (!held) {
+      held = [];
+      for (const m of src.matchAll(/(?<![\w$])(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]{1,100}?)?=\s*([^;\n]{1,300})/g)) held.push({ name: m[1], line: lineOf(m.index), init: m[2] });
+    }
+    const decl = held.filter((h) => h.name === name && h.line <= line).pop();
+    if (!decl) return null;
+    const init = decl.init.replace(JS_STRING, '""').replace(/\s+as\s+const\s*$/, '').trim();
+    const close = init.lastIndexOf(']');
+    const parts = init.startsWith('[') && close > 0 ? topLevel(init.slice(1, close)) : [init];
+    for (const part of parts) {
+      const m = /^\s*(?:await\s+)?(?:\.\.\.)?([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*(?:\(|<|$)/.exec(part);
+      const last = m && m[1].replace(/\s+/g, '').split('.').pop();
+      if (last && isJsGuardName(last)) return last;
+    }
+    return null;
+  };
 
   routes.forEach((r, idx) => {
     const rec = { k: 'route', line: r.line, method: r.method };
@@ -793,8 +826,8 @@ function jsRoutes(src, f, out) {
       .flatMap((option) => option.replace(JS_STRING, '""').match(/[A-Za-z_$][\w$.]*/g) || [])
       .map((name) => name.split('.').pop())
       .find(isJsGuardName);
-    const mw = objectMw || (args.replace(JS_STRING, '""').match(/[A-Za-z_$][\w$.]*/g) || [])
-      .map((name) => name.split('.').pop()).find(isJsGuardName);
+    const argNames = (args.replace(JS_STRING, '""').match(/[A-Za-z_$][\w$.]*/g) || []).map((name) => name.split('.').pop());
+    const mw = objectMw || argNames.find(isJsGuardName) || argNames.map((n) => heldGuard(n, r.line)).find(Boolean);
     // the next route below this one (routes are listed by kind, not in file order)
     const next = Math.min(...routes.map((x) => x.line).filter((l) => l > r.line), r.line + 60);
     const body = lines.slice(r.line - 1, Math.min(next - 1, r.line + 60)).join('\n');

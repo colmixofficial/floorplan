@@ -179,7 +179,19 @@ function mountTarget(f, mount, byPath) {
   return { file: f.path, v: head }; // defined in the same file
 }
 
-export function resolveRoutes(files) {
+/**
+ * @param opts.routePrefixes rules from architecture.json (lib/route-prefixes.mjs): the prefix of routes no
+ *        mount reaches, for routers a registry mounts at run time. Each rule counts the routes it placed (placed).
+ */
+export function resolveRoutes(files, opts = {}) {
+  const prefixRules = opts.routePrefixes || [];
+  for (const rule of prefixRules) rule.placed = 0;
+  // the rule (and the prefix it gives) for a file whose router v no mount reaches: the top of a mount walk
+  const ruleFor = (file, v) => {
+    if (!prefixRules.length || mountsOf(file, v).length) return null;
+    for (const rule of prefixRules) { const prefix = rule.prefixFor(file); if (prefix != null) return { rule, prefix }; }
+    return null;
+  };
   const byPath = new Map(files.map((f) => [f.path, f]));
   const servesOrMounts = (p) => { const t = byPath.get(p); return !!(t?.routes?.length || t?.mounts?.some((m) => m.var || m.spec)); };
   // mountsTo[file] = [{ from, on, v, prefix, line }]   (v === '*' applies to every route in the file)
@@ -232,16 +244,23 @@ export function resolveRoutes(files) {
   // path through them, which doubles with every level), and a file has at most MAX_PREFIXES of them.
   const MAX_PREFIXES = 50;
   const prefixMemo = new Map(), mwMemo = new Map();
+  const ruleOf = new Map(); // `${file}|${v}` → the routePrefixes rule its prefix came from
   const outerPrefixes = (file, v, seen = new Set()) => {
     const key = `${file}|${v ?? ''}`;
     if (prefixMemo.has(key)) return prefixMemo.get(key);
     const ms = mountsOf(file, v);
-    if (!ms.length || seen.has(key)) return [''];
+    if (!ms.length || seen.has(key)) {
+      const top = !ms.length && ruleFor(file, v);
+      if (top) ruleOf.set(key, top.rule);
+      return top ? [top.prefix] : [''];
+    }
     const next = new Set(seen).add(key);
     const out = new Set();
     for (const m of ms) {
       const up = parentOf(m, file);
       for (const p of up ? outerPrefixes(up[0], up[1], next) : ['']) if (out.size < MAX_PREFIXES) out.add(joinPath(p, m.prefix));
+      const upRule = up && ruleOf.get(`${up[0]}|${up[1] ?? ''}`);
+      if (upRule && !ruleOf.has(key)) ruleOf.set(key, upRule);
     }
     prefixMemo.set(key, [...out]);
     return prefixMemo.get(key);
@@ -332,15 +351,21 @@ export function resolveRoutes(files) {
       const hd = r.to && f.lang === 'rust' ? rustHandler(f, r.to, byPath) : null;
       const at = hd?.file ? { file: hd.file, line: hd.line, handler: hd.fn, defFile: f.path, defLine: r.line }
         : { file: f.path, line: r.line, ...(r.handler ? { handler: r.handler } : {}), ...(hd ? { handlerUnresolved: hd.why } : {}) };
-      for (const mp of outerPrefixes(f.path, r.var)) {
+      const prefixes = outerPrefixes(f.path, r.var);
+      const viaRule = ruleOf.get(`${f.path}|${r.var ?? ''}`);
+      for (const mp of prefixes) {
         const path = joinPath(mp, defPrefix, r.path);
         const mw = scopes.length ? [...new Set([...fromMounts, ...scopedMw(f, r, path)])] : fromMounts;
         routes.push({ ...at, method: r.method, path, ...(r.doc ? { doc: r.doc } : {}), ...(mw.length ? { mountMw: mw } : {}), ...(r.caseInsensitive ? { caseInsensitive: true } : {}) });
+        // counted once the list is deduped; not written into the scan
+        if (viaRule) Object.defineProperty(routes[routes.length - 1], 'viaRule', { value: viaRule });
       }
     }
   }
   routes.push(...conventionalRoutes(files), ...inheritedRoutes(files));
-  return dedupe(routes, (r) => `${r.file}|${r.method}|${r.path}`);
+  const out = dedupe(routes, (r) => `${r.file}|${r.method}|${r.path}`);
+  for (const r of out) if (r.viaRule) r.viaRule.placed++;
+  return out;
 }
 
 /** Where each ASP.NET Core project mapper (MapOrders(this RouteGroupBuilder g)) is called: `${repo}|${name}` -> calls */
